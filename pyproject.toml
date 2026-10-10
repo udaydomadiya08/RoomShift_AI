@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "roomshift-ai"
+version = "0.1.0"
+description = "3D spatial change detection for indoor environments from phone recordings"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = [
+    "opencv-python>=4.8",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "scikit-learn>=1.2",
+    "torch>=2.0",
+    "open3d>=0.17",
+    "plotly>=5.0",
+    "ultralytics>=8.0",
+    "Pillow>=9.0",
+    "flask>=3.0",
+    "trimesh>=4.0",
+    "tqdm>=4.60",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-cov"]
+
+[project.scripts]
+roomshift = "roomshift.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

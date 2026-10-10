@@ -1,0 +1,53 @@
+{
+  "scenario": "removed",
+  "changes": [
+    {
+      "object_label": "box",
+      "change_type": "removed",
+      "approximate_position": [
+        450,
+        300,
+        0
+      ]
+    }
+  ],
+  "before_objects": [
+    {
+      "label": "chair",
+      "position": [
+        100,
+        200
+      ]
+    },
+    {
+      "label": "table",
+      "position": [
+        300,
+        150
+      ]
+    },
+    {
+      "label": "box",
+      "position": [
+        450,
+        300
+      ]
+    }
+  ],
+  "after_objects": [
+    {
+      "label": "chair",
+      "position": [
+        100,
+        200
+      ]
+    },
+    {
+      "label": "table",
+      "position": [
+        300,
+        150
+      ]
+    }
+  ]
+}

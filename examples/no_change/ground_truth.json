@@ -1,0 +1,59 @@
+{
+  "scenario": "no_change",
+  "changes": [
+    {
+      "object_label": "chair",
+      "change_type": "none"
+    },
+    {
+      "object_label": "table",
+      "change_type": "none"
+    }
+  ],
+  "before_objects": [
+    {
+      "label": "chair",
+      "position": [
+        100,
+        200
+      ]
+    },
+    {
+      "label": "table",
+      "position": [
+        300,
+        150
+      ]
+    },
+    {
+      "label": "box",
+      "position": [
+        450,
+        300
+      ]
+    }
+  ],
+  "after_objects": [
+    {
+      "label": "chair",
+      "position": [
+        100,
+        200
+      ]
+    },
+    {
+      "label": "table",
+      "position": [
+        300,
+        150
+      ]
+    },
+    {
+      "label": "box",
+      "position": [
+        450,
+        300
+      ]
+    }
+  ]
+}

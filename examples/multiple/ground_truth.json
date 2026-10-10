@@ -1,0 +1,63 @@
+{
+  "scenario": "multiple",
+  "changes": [
+    {
+      "object_label": "chair",
+      "change_type": "moved"
+    },
+    {
+      "object_label": "box",
+      "change_type": "removed"
+    },
+    {
+      "object_label": "lamp",
+      "change_type": "added"
+    }
+  ],
+  "before_objects": [
+    {
+      "label": "chair",
+      "position": [
+        100,
+        200
+      ]
+    },
+    {
+      "label": "table",
+      "position": [
+        300,
+        150
+      ]
+    },
+    {
+      "label": "box",
+      "position": [
+        450,
+        300
+      ]
+    }
+  ],
+  "after_objects": [
+    {
+      "label": "chair",
+      "position": [
+        200,
+        200
+      ]
+    },
+    {
+      "label": "table",
+      "position": [
+        300,
+        150
+      ]
+    },
+    {
+      "label": "lamp",
+      "position": [
+        50,
+        50
+      ]
+    }
+  ]
+}

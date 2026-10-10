@@ -1,0 +1,60 @@
+{
+  "scenario": "moved",
+  "changes": [
+    {
+      "object_label": "chair",
+      "change_type": "moved",
+      "approximate_position": [
+        200,
+        300,
+        0
+      ]
+    }
+  ],
+  "before_objects": [
+    {
+      "label": "chair",
+      "position": [
+        100,
+        200
+      ]
+    },
+    {
+      "label": "table",
+      "position": [
+        300,
+        150
+      ]
+    },
+    {
+      "label": "box",
+      "position": [
+        450,
+        300
+      ]
+    }
+  ],
+  "after_objects": [
+    {
+      "label": "chair",
+      "position": [
+        200,
+        300
+      ]
+    },
+    {
+      "label": "table",
+      "position": [
+        300,
+        150
+      ]
+    },
+    {
+      "label": "box",
+      "position": [
+        450,
+        300
+      ]
+    }
+  ]
+}

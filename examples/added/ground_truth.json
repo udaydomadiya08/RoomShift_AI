@@ -1,0 +1,67 @@
+{
+  "scenario": "added",
+  "changes": [
+    {
+      "object_label": "bag",
+      "change_type": "added",
+      "approximate_position": [
+        500,
+        100,
+        0
+      ]
+    }
+  ],
+  "before_objects": [
+    {
+      "label": "chair",
+      "position": [
+        100,
+        200
+      ]
+    },
+    {
+      "label": "table",
+      "position": [
+        300,
+        150
+      ]
+    },
+    {
+      "label": "box",
+      "position": [
+        450,
+        300
+      ]
+    }
+  ],
+  "after_objects": [
+    {
+      "label": "chair",
+      "position": [
+        100,
+        200
+      ]
+    },
+    {
+      "label": "table",
+      "position": [
+        300,
+        150
+      ]
+    },
+    {
+      "label": "box",
+      "position": [
+        450,
+        300
+      ]
+    },
+    {
+      "label": "bag",
+      "position": [
+        500,
+        100
+      ]
+    }
+  ]
+}
