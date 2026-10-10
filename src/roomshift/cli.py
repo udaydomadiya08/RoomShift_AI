@@ -121,6 +121,49 @@ def cmd_evaluate(args):
         return 1
 
 
+def cmd_evaluate_3rscan(args):
+    """Run evaluation on real 3RScan validation scenes."""
+    from .adapters.evaluate_3rscan import evaluate_3rscan_validation
+
+    try:
+        results = evaluate_3rscan_validation(
+            data_dir=args.data_dir,
+            max_scenes=args.max_scenes,
+            position_threshold=args.threshold,
+        )
+
+        output_path = args.output or "outputs/3rscan_evaluation.json"
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(results, f, indent=2)
+
+        print("\n" + "=" * 60)
+        print("ROOMSHIFT AI — 3RSCAN VALIDATION EVALUATION RESULTS")
+        print("=" * 60)
+        print(f"Dataset:              3RScan (TUM CAMPAR, ICCV 2019)")
+        print(f"Split:                Validation")
+        print(f"Scenes Evaluated:     {results['scenes_evaluated']}")
+        print(f"Precision:            {results['precision']:.3f}")
+        print(f"Recall:               {results['recall']:.3f}")
+        print(f"F1 Score:             {results['f1_score']:.3f}")
+        print(f"TP / FP / FN:         {results['total_true_positives']} / {results['total_false_positives']} / {results['total_false_negatives']}")
+        if results.get('displacement_mae_meters', 0) > 0:
+            print(f"Displacement MAE:     {results['displacement_mae_meters']:.3f} m")
+        print("\nPer-Class Breakdown:")
+        for cat, m in results['per_class'].items():
+            print(f"  {cat.upper():10s} - P: {m['precision']:.3f}, R: {m['recall']:.3f}, F1: {m['f1']:.3f} (TP={m['tp']}, FP={m['fp']}, FN={m['fn']})")
+        print("=" * 60)
+        print(f"Report saved to: {os.path.abspath(output_path)}\n")
+        return 0
+
+    except Exception as e:
+        if args.verbose:
+            traceback.print_exc()
+        else:
+            print(f"\n✗ 3RScan evaluation error: {e}", file=sys.stderr)
+        return 1
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -144,6 +187,13 @@ def main():
     eval_parser.add_argument('--results', '-r', required=True, help='Path to change_report.json')
     eval_parser.add_argument('--ground-truth', '-g', required=True, help='Path to ground truth JSON')
     eval_parser.add_argument('--output', '-o', help='Path to save evaluation report')
+
+    # Evaluate 3RScan command
+    rscan_parser = subparsers.add_parser('evaluate-3rscan', help='Evaluate against official 3RScan dataset')
+    rscan_parser.add_argument('--data-dir', default='data/external/3rscan', help='Path to 3RScan data directory')
+    rscan_parser.add_argument('--max-scenes', type=int, default=20, help='Max validation scenes to evaluate')
+    rscan_parser.add_argument('--threshold', type=float, default=0.25, help='Spatial change threshold in meters')
+    rscan_parser.add_argument('--output', '-o', default='outputs/3rscan_evaluation.json', help='Output JSON path')
     
     args = parser.parse_args()
     
@@ -157,6 +207,8 @@ def main():
         return cmd_compare(args)
     elif args.command == 'evaluate':
         return cmd_evaluate(args)
+    elif args.command == 'evaluate-3rscan':
+        return cmd_evaluate_3rscan(args)
     
     return 0
 

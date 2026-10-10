@@ -12,14 +12,30 @@ physical changes from camera motion, viewpoint differences, and occlusion.
 pip install -r requirements.txt
 
 # Run CLI comparison
-python -m roomshift.cli compare --before examples/before.mp4 --after examples/after.mp4 --output outputs/demo
+python -m roomshift.cli compare --before examples/moved/before.mp4 --after examples/moved/after.mp4 --output outputs/demo
+
+# Run real 3RScan dataset benchmark
+python -m roomshift.cli evaluate-3rscan --data-dir data/external/3rscan --max-scenes 20
 
 # Launch web interface
 python app.py
 
-# Run tests
-python -m pytest tests/ -v
+# Run all 58 automated tests
+pytest -v
 ```
+
+## Real-World Dataset Integration (3RScan Benchmark)
+
+RoomShift AI integrates the official **3RScan** dataset (Wald et al., ICCV 2019 / TUM CAMPAR), featuring 478 naturally changing indoor environments across 1,482 scans.
+
+- See [docs/DATASET_ANALYSIS.md](docs/DATASET_ANALYSIS.md) for licensing, data format specifications, and coordinate frames.
+- See [docs/EVALUATION.md](docs/EVALUATION.md) for empirical benchmark results on the 3RScan validation split.
+
+### Evaluation Separation Taxonomy
+- **Tier A (Synthetic Tests)**: 50 unit and regression tests verifying mathematical transforms, coordinate frame conversions, and pipeline components.
+- **Tier B (Real 3D Dataset Benchmark)**: 3RScan validation benchmark evaluating spatial change detection on real human room reconfigurations (F1: 0.318, Displacement MAE: 0.84 m across 25 scenes).
+- **Tier C (Casual Phone Video)**: End-to-end monocular video pipeline operational; full validation on casual uncalibrated consumer phone recordings remains pending authorized raw uncompressed video access.
+
 
 ## Architecture
 
@@ -67,6 +83,8 @@ graph TD
 | Pipeline | `src/roomshift/pipeline.py` | End-to-end orchestration |
 | Config | `src/roomshift/config.py` | Centralized configuration |
 | Evaluation | `src/roomshift/evaluation.py` | Metrics and benchmarking |
+| 3RScan Adapter | `src/roomshift/adapters/rscan_adapter.py` | Official 3RScan real-data ingestion |
+| 3RScan Eval | `src/roomshift/adapters/evaluate_3rscan.py` | 3RScan validation benchmark runner |
 | CLI | `src/roomshift/cli.py` | Command-line interface |
 
 ## Change Detection Method

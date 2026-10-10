@@ -39,6 +39,10 @@ models/weights/
 # Jupyter
 .ipynb_checkpoints/
 
+# External Datasets
+data/
+data/external/
+
 # Temp
 tmp/
 temp/

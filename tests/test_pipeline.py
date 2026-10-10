@@ -638,6 +638,17 @@ class TestCLI:
         )
         assert result.returncode != 0
 
+    def test_cli_evaluate_3rscan_help(self):
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, '-m', 'roomshift.cli', 'evaluate-3rscan', '--help'],
+            capture_output=True, text=True,
+            cwd=os.path.join(os.path.dirname(__file__), '..'),
+            env={**os.environ, 'PYTHONPATH': os.path.join(os.path.dirname(__file__), '..', 'src')},
+        )
+        assert result.returncode == 0
+        assert '3RScan' in result.stdout or 'max-scenes' in result.stdout
+
 
 # ─── Regression Tests ────────────────────────────────────────────────────────
 
