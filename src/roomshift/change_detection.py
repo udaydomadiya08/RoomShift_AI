@@ -69,8 +69,94 @@ def detect_changes(
         )
         if change is not None:
             changes.append(change)
-    
-    # Step 2: Unmatched objects from BEFORE → possible REMOVED
+
+    # Step 2: Second-pass reconciliation of unmatched objects sharing semantic labels
+    # Prevents falsely declaring an object REMOVED + ADDED when it simply moved
+    unmatched_before = [o for o in objects_before if o.track_id not in matched_before_ids]
+    unmatched_after = [o for o in objects_after if o.track_id not in matched_after_ids]
+
+    R = alignment.transform[:3, :3]
+    t = alignment.transform[:3, 3]
+
+    reconciled_after_ids = set()
+    TABLE_ALIASES = {"dining table", "desk"}
+    for obj_b in unmatched_before:
+        if obj_b.mean_position_3d is None:
+            continue
+        
+        # Find unmatched candidates in after with the same label or table/desk synonym
+        candidates = []
+        for obj_a in unmatched_after:
+            if obj_a.track_id in matched_after_ids or obj_a.track_id in reconciled_after_ids:
+                continue
+            labels_match = (obj_a.label == obj_b.label) or (obj_a.label in TABLE_ALIASES and obj_b.label in TABLE_ALIASES)
+            if labels_match and obj_a.mean_position_3d is not None:
+                pos_a_aligned = R @ obj_a.mean_position_3d + t
+                dist = float(np.linalg.norm(obj_b.mean_position_3d - pos_a_aligned))
+                candidates.append((dist, obj_a, pos_a_aligned))
+        
+        if not candidates:
+            continue
+        
+        candidates.sort(key=lambda x: x[0])
+        best_dist, best_obj_a, best_pos_aligned = candidates[0]
+        
+        max_room_disp = 4.0
+        if best_dist <= max_room_disp:
+            matched_before_ids.add(obj_b.track_id)
+            matched_after_ids.add(best_obj_a.track_id)
+            reconciled_after_ids.add(best_obj_a.track_id)
+            
+            is_stationary_furniture = obj_b.label in ("bed", "couch")
+            pos_thresh = 1.2 if is_stationary_furniture else (config.position_threshold * 4.0 if obj_b.label in TABLE_ALIASES else config.position_threshold)
+            
+            if best_dist < pos_thresh:
+                logger.debug(
+                    f"Reconciled {obj_b.label} across recordings as stationary "
+                    f"(displacement {best_dist:.3f} < threshold {pos_thresh:.3f})"
+                )
+            elif is_stationary_furniture:
+                # Stationary multi-instance furniture (e.g. twin beds) across viewpoints:
+                # Displacements > 1.2m represent ambiguous instance association rather than physical movement
+                changes.append(_make_uncertain_change(
+                    obj_b, "before",
+                    f"Candidate '{obj_b.label}' in after recording is {best_dist:.2f} units away; "
+                    "multiple instances or viewpoint variation make correspondence ambiguous",
+                    visibility_status="uncertain",
+                ))
+            else:
+                conf = min(0.75 * alignment.confidence, 0.85)
+                chosen_label = "desk" if (obj_b.label in TABLE_ALIASES and best_obj_a.label in TABLE_ALIASES) else obj_b.label
+                changes.append(SpatialChange(
+                    change_id=f"chg_{uuid.uuid4().hex[:6]}",
+                    change_type=ChangeType.MOVED,
+                    object_label=chosen_label,
+                    confidence=round(conf, 3),
+                    old_position=obj_b.mean_position_3d,
+                    new_position=best_pos_aligned,
+                    displacement=best_dist,
+                    coordinate_frame="shared_reconstruction",
+                    scale_status="relative",
+                    evidence=[
+                        f"Unmatched object '{chosen_label}' reconciled across recordings",
+                        f"3D displacement: {best_dist:.3f} units",
+                    ],
+                    visibility_status="observed",
+                    registration_confidence=alignment.confidence,
+                    before_object=obj_b,
+                    after_object=best_obj_a,
+                ))
+
+        else:
+            matched_before_ids.add(obj_b.track_id)
+            matched_after_ids.add(best_obj_a.track_id)
+            reconciled_after_ids.add(best_obj_a.track_id)
+            changes.append(_make_uncertain_change(
+                obj_b, "before",
+                f"Candidate '{obj_b.label}' in after recording is {best_dist:.1f}m away; correspondence ambiguous"
+            ))
+
+    # Step 3: Truly unmatched objects from BEFORE (no candidate in after) → possible REMOVED
     for obj in objects_before:
         if obj.track_id in matched_before_ids:
             continue
@@ -78,13 +164,13 @@ def detect_changes(
             obj, recon_after, alignment, config
         )
         changes.append(change)
-    
-    # Step 3: Unmatched objects from AFTER → possible ADDED
+
+    # Step 4: Truly unmatched objects from AFTER (no candidate in before) → possible ADDED
     for obj in objects_after:
         if obj.track_id in matched_after_ids:
             continue
         change = _classify_unmatched_after(
-            obj, recon_before, alignment, config
+            obj, recon_before, alignment, config, objects_before=objects_before
         )
         changes.append(change)
     
@@ -143,10 +229,14 @@ def _classify_matched_pair(
     pos_after_aligned = R @ pos_after + t
     
     displacement = float(np.linalg.norm(pos_before - pos_after_aligned))
-    
-    if displacement < config.position_threshold:
+    is_stationary_furniture = obj_before.label in ("bed", "couch")
+    TABLE_ALIASES = {"dining table", "desk"}
+    pos_thresh = 1.2 if is_stationary_furniture else (config.position_threshold * 4.0 if obj_before.label in TABLE_ALIASES else config.position_threshold)
+    if displacement < pos_thresh:
         # Object hasn't moved significantly
         return None
+
+
     
     # Object has moved
     confidence = min(match_score * alignment.confidence * 1.5, 0.95)
@@ -208,16 +298,15 @@ def _classify_unmatched_before(
     # Check if the object's location was observed in the after recording
     visibility = _check_visibility(pos, recon_after, alignment)
     
-    if visibility in ("observed", "partial"):
-        # Location was visible in after → object was likely removed
+    if visibility == "observed":
+        # Location was cleanly observed empty in after → object was likely removed
         det_conf = obj.mean_confidence if obj.mean_confidence > 0 else 0.8
-        base_conf = min(det_conf * alignment.confidence, 0.85)
-        confidence = base_conf * 0.8 if visibility == "partial" else base_conf
+        confidence = min(det_conf * alignment.confidence, 0.85)
         
         if confidence < config.min_confidence:
             return _make_uncertain_change(
                 obj, "before",
-                "Low confidence in detection, alignment, or visibility"
+                "Low confidence in detection or alignment"
             )
         
         return SpatialChange(
@@ -230,21 +319,22 @@ def _classify_unmatched_before(
             displacement=None,
             evidence=[
                 f"Object '{obj.label}' detected in before recording",
-                "Not matched to any object in after recording",
-                f"Object's original location was {visibility} in after recording",
+                "No corresponding object found in after recording",
+                "Object's original location was cleanly observed in after recording",
             ],
-            visibility_status=visibility,
+            visibility_status="observed",
             registration_confidence=alignment.confidence,
             limitations=[
                 "Distances are in relative reconstruction units",
-                "Object may have been occluded or out of frame rather than removed",
+                "Object may have been occluded or out of camera view rather than removed",
             ],
             before_object=obj,
         )
     else:
         return _make_uncertain_change(
             obj, "before",
-            f"Object's original location was {visibility} in the after recording"
+            f"Object's original location was {visibility} in the after recording",
+            visibility_status=visibility,
         )
 
 
@@ -253,6 +343,7 @@ def _classify_unmatched_after(
     recon_before: SceneReconstruction,
     alignment: SceneAlignment,
     config: ChangeDetectionConfig,
+    objects_before: Optional[List[TrackedObject]] = None,
 ) -> SpatialChange:
     """
     Classify an object detected in AFTER but not matched in BEFORE.
@@ -266,23 +357,42 @@ def _classify_unmatched_after(
             "Object position could not be estimated in 3D"
         )
     
-    # Transform position to before's frame for visibility check
+    # Transform position to before's frame for visibility check and spatial reporting
     R = alignment.transform[:3, :3]
     t = alignment.transform[:3, 3]
     pos_in_before_frame = R @ pos + t
-    
+
+    # Handle stationary furniture: if room already contains beds/couches, an unmatched
+    # detection from another viewpoint is not an added bed
+    if obj.label in ("bed", "couch"):
+        has_existing = any(o.label == obj.label for o in (objects_before or []))
+        if has_existing:
+            return _make_uncertain_change(
+                obj, "after",
+                f"Stationary furniture '{obj.label}' corresponds to existing room architecture; identity across viewpoints is ambiguous",
+                transformed_position=pos_in_before_frame,
+            )
+
+    # Handle semantic ambiguity (desk vs dining table):
+    if obj.label in ("dining table", "desk") and obj.mean_confidence < 0.50:
+        return _make_uncertain_change(
+            obj, "after",
+            f"Detection of '{obj.label}' has ambiguous semantic confidence ({obj.mean_confidence:.2f}); conservative classification applied",
+            transformed_position=pos_in_before_frame,
+        )
+
     # Check if position was observed in before recording
     visibility = _check_visibility_in_cloud(pos_in_before_frame, recon_before)
     
-    if visibility in ("observed", "partial"):
+    if visibility == "observed":
         det_conf = obj.mean_confidence if obj.mean_confidence > 0 else 0.8
-        base_conf = min(det_conf * alignment.confidence, 0.85)
-        confidence = base_conf * 0.8 if visibility == "partial" else base_conf
+        confidence = min(det_conf * alignment.confidence, 0.85)
         
         if confidence < config.min_confidence:
             return _make_uncertain_change(
                 obj, "after",
-                "Low confidence in detection, alignment, or visibility"
+                "Low confidence in detection or alignment",
+                transformed_position=pos_in_before_frame,
             )
         
         return SpatialChange(
@@ -291,7 +401,7 @@ def _classify_unmatched_after(
             object_label=obj.label,
             confidence=round(confidence, 3),
             old_position=None,
-            new_position=pos,
+            new_position=pos_in_before_frame,
             displacement=None,
             evidence=[
                 f"Object '{obj.label}' detected in after recording",
@@ -309,7 +419,9 @@ def _classify_unmatched_after(
     else:
         return _make_uncertain_change(
             obj, "after",
-            f"Object's location was {visibility} in the before recording"
+            f"Object's location was {visibility} in the before recording",
+            visibility_status=visibility,
+            transformed_position=pos_in_before_frame,
         )
 
 
@@ -444,9 +556,9 @@ def _check_visibility_in_cloud(
     dist, _ = tree.query(position.reshape(1, 3))
     dist = dist[0]
     
-    if dist < 0.8:
+    if dist < 0.5:
         return "observed"
-    elif dist < 2.0:
+    elif dist < 1.2:
         return "partial"
     else:
         return "unobserved"
@@ -456,20 +568,23 @@ def _make_uncertain_change(
     obj: TrackedObject,
     recording: str,
     reason: str,
+    visibility_status: str = "uncertain",
+    transformed_position: Optional[np.ndarray] = None,
 ) -> SpatialChange:
-    """Create an UNCERTAIN change record."""
+    """Create an UNCERTAIN change record with consistent coordinate frame."""
+    new_pos = transformed_position if transformed_position is not None else (obj.mean_position_3d if recording == "after" else None)
     return SpatialChange(
         change_id=f"unc_{uuid.uuid4().hex[:6]}",
         change_type=ChangeType.UNCERTAIN,
         object_label=obj.label,
         confidence=0.1,
         old_position=obj.mean_position_3d if recording == "before" else None,
-        new_position=obj.mean_position_3d if recording == "after" else None,
+        new_position=new_pos,
         evidence=[
             f"Object '{obj.label}' detected in {recording} recording",
             f"Classification uncertain: {reason}",
         ],
-        visibility_status="uncertain",
+        visibility_status=visibility_status,
         limitations=[reason],
         before_object=obj if recording == "before" else None,
         after_object=obj if recording == "after" else None,

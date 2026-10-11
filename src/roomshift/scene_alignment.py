@@ -67,6 +67,8 @@ def align_scenes(
         # Boost confidence if ICP converged well
         if icp_fitness > 0.3:
             confidence = min(confidence + 0.2, 1.0)
+        elif icp_fitness > 0.1:
+            confidence = min(confidence + icp_fitness * 0.3, 1.0)
     
     # Step 3: If feature-based failed, try direct ICP
     if transform is None and recon1.point_cloud and recon2.point_cloud:
@@ -88,7 +90,7 @@ def align_scenes(
 
     alignment = SceneAlignment(
         transform=transform,
-        scale=1.0,  # relative scale (not metric)
+        scale=diagnostics.get('scale', 1.0),
         inlier_count=diagnostics.get('inlier_count', 0),
         inlier_ratio=diagnostics.get('inlier_ratio', 0.0),
         fitness=diagnostics.get('icp_fitness', 0.0),
@@ -135,13 +137,17 @@ def _feature_based_alignment(
     Estimate alignment using cross-recording feature matches.
     
     Matches features between frames from different recordings,
-    finds 3D correspondences, and estimates a rigid transform.
+    finds 3D correspondences in the world coordinate frames, and estimates a rigid/similarity transform.
     """
     diagnostics = {'method': 'feature_based'}
     
-    # Sample frames from each recording for matching
-    sample1 = frames1[::max(1, len(frames1)//5)][:5]
-    sample2 = frames2[::max(1, len(frames2)//5)][:5]
+    # Sample frames across each recording (up to 8 frames per recording for broader overlap)
+    n1 = len(frames1)
+    n2 = len(frames2)
+    step1 = max(1, n1 // 8)
+    step2 = max(1, n2 // 8)
+    sample1 = frames1[::step1][:8]
+    sample2 = frames2[::step2][:8]
 
     all_pts1_3d = []
     all_pts2_3d = []
@@ -158,7 +164,7 @@ def _feature_based_alignment(
 
             # Match features across recordings
             matches = match_features(desc1, desc2, recon_config)
-            if len(matches) < 15:
+            if len(matches) < 12:
                 continue
 
             # Get 2D points
@@ -175,10 +181,10 @@ def _feature_based_alignment(
                 continue
             
             inliers = mask.ravel().astype(bool)
-            if np.sum(inliers) < 10:
+            if np.sum(inliers) < 8:
                 continue
 
-            # Back-project to 3D using depth maps
+            # Back-project to 3D world coordinates using depth maps and camera poses
             pts1_3d = _backproject_2d_to_3d(
                 pts1_2d[inliers], f1, recon1
             )
@@ -191,8 +197,9 @@ def _feature_based_alignment(
                     np.all(np.isfinite(pts1_3d), axis=1) &
                     np.all(np.isfinite(pts2_3d), axis=1)
                 )
-                all_pts1_3d.append(pts1_3d[valid])
-                all_pts2_3d.append(pts2_3d[valid])
+                if np.sum(valid) >= 4:
+                    all_pts1_3d.append(pts1_3d[valid])
+                    all_pts2_3d.append(pts2_3d[valid])
 
     if not all_pts1_3d or not all_pts2_3d:
         logger.warning("No 3D correspondences found for alignment")
@@ -204,18 +211,26 @@ def _feature_based_alignment(
     if len(pts1) < 4:
         return None, 0.0, diagnostics
 
-    # Estimate rigid transform with RANSAC
-    transform, inlier_count, inlier_ratio = _ransac_rigid_transform(
+    # Scale-adaptive RANSAC threshold based on coordinate extent
+    extent1 = float(np.linalg.norm(np.ptp(pts1, axis=0))) if len(pts1) > 1 else 1.0
+    extent2 = float(np.linalg.norm(np.ptp(pts2, axis=0))) if len(pts2) > 1 else 1.0
+    ref_extent = max(extent1, extent2, 1.0)
+    ransac_thresh = max(align_config.ransac_threshold, ref_extent * 0.05)
+
+    # Estimate rigid/similarity transform with RANSAC
+    transform, inlier_count, inlier_ratio, scale = _ransac_rigid_transform(
         pts2, pts1,  # from scene2 to scene1
         iterations=align_config.ransac_iterations,
-        threshold=align_config.icp_threshold * 5,
+        threshold=ransac_thresh,
+        allow_scale=True,
     )
 
     diagnostics['num_correspondences'] = len(pts1)
     diagnostics['inlier_count'] = inlier_count
     diagnostics['inlier_ratio'] = inlier_ratio
+    diagnostics['scale'] = scale
 
-    confidence = min(inlier_ratio * 2.0, 1.0) * min(inlier_count / 20.0, 1.0)
+    confidence = min(inlier_ratio * 2.0, 1.0) * min(inlier_count / 15.0, 1.0)
     
     return transform, confidence, diagnostics
 
@@ -226,7 +241,8 @@ def _backproject_2d_to_3d(
     recon: SceneReconstruction,
 ) -> Optional[np.ndarray]:
     """
-    Back-project 2D points to 3D using available depth maps.
+    Back-project 2D points to 3D world coordinates using available depth maps
+    and camera poses, exactly matching reconstruction.backproject_depth.
     """
     # Find depth map for this frame
     depth_map = None
@@ -236,11 +252,24 @@ def _backproject_2d_to_3d(
             break
     
     if depth_map is None:
-        # Use nearest depth map
         if recon.depth_maps:
-            depth_map = recon.depth_maps[0]
+            depth_map = min(
+                recon.depth_maps,
+                key=lambda dm: abs(dm.frame_index - frame.frame_index)
+            )
         else:
             return None
+
+    # Find camera pose for this frame
+    pose = None
+    for p in recon.camera_poses:
+        if p.frame_index == frame.frame_index:
+            pose = p
+            break
+    if pose is None and recon.camera_poses:
+        pose = recon.camera_poses[0]
+    if pose is None:
+        return None
 
     depth = depth_map.depth
     h, w = depth.shape[:2]
@@ -249,28 +278,48 @@ def _backproject_2d_to_3d(
     if (h, w) != (img_h, img_w):
         depth = cv2.resize(depth, (img_w, img_h))
 
-    K = recon.intrinsics
+    valid_mask = (depth > 0) & np.isfinite(depth)
+    if not np.any(valid_mask):
+        return None
 
-    pts_3d = []
+    is_metric = getattr(depth_map, 'is_metric', False)
+    if not is_metric:
+        inv_all = 1.0 / (depth[valid_mask] + 1e-6)
+        median_inv = np.median(inv_all) if len(inv_all) > 0 else 1.0
+        if median_inv <= 0:
+            median_inv = 1.0
+
+    K = recon.intrinsics
+    pts_3d_world = []
+
+    R_inv = pose.rotation.T
+    t_inv = -R_inv @ pose.translation.reshape(3, 1)
+
     for x, y in pts_2d:
         xi, yi = int(round(x)), int(round(y))
         xi = max(0, min(xi, img_w - 1))
         yi = max(0, min(yi, img_h - 1))
         
-        z = depth[yi, xi]
-        if z <= 0 or not np.isfinite(z):
-            pts_3d.append([np.nan, np.nan, np.nan])
+        raw_z = depth[yi, xi]
+        if raw_z <= 0 or not np.isfinite(raw_z):
+            pts_3d_world.append([np.nan, np.nan, np.nan])
             continue
         
-        # Invert MiDaS depth (inverse depth)
-        z = 1.0 / (z + 1e-6)
-        z = z * 2.0  # normalize
+        if is_metric:
+            z = raw_z
+        else:
+            # Invert MiDaS depth and normalize median to 2.0 units, matching backproject_depth
+            z = (1.0 / (raw_z + 1e-6)) / median_inv * 2.0
         
-        x3d = (xi - K.cx) * z / K.fx
-        y3d = (yi - K.cy) * z / K.fy
-        pts_3d.append([x3d, y3d, z])
+        x_cam = (xi - K.cx) * z / K.fx
+        y_cam = (yi - K.cy) * z / K.fy
+        z_cam = z
+        
+        pt_cam = np.array([x_cam, y_cam, z_cam], dtype=np.float64).reshape(3, 1)
+        pt_world = (R_inv @ pt_cam + t_inv).ravel()
+        pts_3d_world.append(pt_world)
 
-    return np.array(pts_3d)
+    return np.array(pts_3d_world)
 
 
 def _ransac_rigid_transform(
@@ -278,29 +327,28 @@ def _ransac_rigid_transform(
     dst: np.ndarray,
     iterations: int = 1000,
     threshold: float = 0.1,
-) -> Tuple[Optional[np.ndarray], int, float]:
+    allow_scale: bool = False,
+) -> Tuple[Optional[np.ndarray], int, float, float]:
     """
-    RANSAC estimation of rigid transform (rotation + translation).
+    RANSAC estimation of rigid or similarity transform.
     src, dst: (N, 3) point sets.
-    Returns (4x4 transform, inlier_count, inlier_ratio).
+    Returns (4x4 transform, inlier_count, inlier_ratio, scale).
     """
     n = len(src)
     if n < 4:
-        return None, 0, 0.0
+        return None, 0, 0.0, 1.0
 
     best_transform = None
     best_inliers = 0
     best_ratio = 0.0
+    best_scale = 1.0
 
     for _ in range(iterations):
-        # Sample 4 random correspondences
         idx = np.random.choice(n, 4, replace=False)
-        
-        T = _estimate_rigid_transform(src[idx], dst[idx])
+        T, s = _estimate_rigid_transform(src[idx], dst[idx], allow_scale=allow_scale)
         if T is None:
             continue
 
-        # Count inliers
         src_h = np.hstack([src, np.ones((n, 1))])
         transformed = (T @ src_h.T).T[:, :3]
         errors = np.linalg.norm(transformed - dst, axis=1)
@@ -310,6 +358,7 @@ def _ransac_rigid_transform(
             best_inliers = inliers
             best_ratio = inliers / n
             best_transform = T
+            best_scale = s
 
     # Refine with all inliers
     if best_transform is not None and best_inliers >= 4:
@@ -319,21 +368,28 @@ def _ransac_rigid_transform(
         inlier_mask = errors < threshold
         
         if np.sum(inlier_mask) >= 4:
-            refined = _estimate_rigid_transform(src[inlier_mask], dst[inlier_mask])
+            refined, refined_s = _estimate_rigid_transform(
+                src[inlier_mask], dst[inlier_mask], allow_scale=allow_scale
+            )
             if refined is not None:
                 best_transform = refined
+                best_scale = refined_s
 
-    return best_transform, best_inliers, best_ratio
+    return best_transform, best_inliers, best_ratio, best_scale
 
 
-def _estimate_rigid_transform(src: np.ndarray, dst: np.ndarray) -> Optional[np.ndarray]:
+def _estimate_rigid_transform(
+    src: np.ndarray,
+    dst: np.ndarray,
+    allow_scale: bool = False,
+) -> Tuple[Optional[np.ndarray], float]:
     """
-    Estimate rigid transform using SVD (Procrustes).
+    Estimate rigid or similarity transform using SVD (Kabsch / Umeyama).
     src, dst: (N, 3) corresponding points.
-    Returns 4x4 transformation matrix.
+    Returns (4x4 transformation matrix, scale).
     """
     if len(src) < 3:
-        return None
+        return None, 1.0
     
     centroid_src = np.mean(src, axis=0)
     centroid_dst = np.mean(dst, axis=0)
@@ -341,7 +397,7 @@ def _estimate_rigid_transform(src: np.ndarray, dst: np.ndarray) -> Optional[np.n
     src_c = src - centroid_src
     dst_c = dst - centroid_dst
     
-    H = src_c.T @ dst_c
+    H = src_c.T @ dst_c / len(src)
     U, S, Vt = np.linalg.svd(H)
     
     R = Vt.T @ U.T
@@ -351,13 +407,20 @@ def _estimate_rigid_transform(src: np.ndarray, dst: np.ndarray) -> Optional[np.n
         Vt[-1, :] *= -1
         R = Vt.T @ U.T
     
-    t = centroid_dst - R @ centroid_src
+    scale = 1.0
+    if allow_scale:
+        var_src = np.mean(np.sum(src_c**2, axis=1))
+        if var_src > 1e-8:
+            s_raw = (1.0 / var_src) * np.sum(S)
+            scale = float(np.clip(s_raw, 0.3, 3.0))
+    
+    t = centroid_dst - scale * (R @ centroid_src)
     
     T = np.eye(4)
-    T[:3, :3] = R
+    T[:3, :3] = scale * R
     T[:3, 3] = t
     
-    return T
+    return T, scale
 
 
 def _icp_refinement(
@@ -367,7 +430,7 @@ def _icp_refinement(
     config: AlignmentConfig,
 ) -> Tuple[np.ndarray, float, float]:
     """
-    Refine alignment using ICP (Iterative Closest Point).
+    Refine alignment using multi-stage scale-adaptive ICP.
     """
     try:
         import open3d as o3d
@@ -378,28 +441,65 @@ def _icp_refinement(
         pcd2 = o3d.geometry.PointCloud()
         pcd2.points = o3d.utility.Vector3dVector(cloud2.points)
         
-        # Downsample for speed
-        voxel_size = 0.05
+        extent1 = float(np.linalg.norm(np.ptp(cloud1.points, axis=0)))
+        extent2 = float(np.linalg.norm(np.ptp(cloud2.points, axis=0)))
+        extent = max(extent1, extent2, 1.0)
+        
+        # Scale-adaptive voxel downsampling
+        voxel_size = max(0.05, extent * 0.015)
         pcd1_down = pcd1.voxel_down_sample(voxel_size)
         pcd2_down = pcd2.voxel_down_sample(voxel_size)
         
-        # Estimate normals
-        pcd1_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2, max_nn=30))
-        pcd2_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2, max_nn=30))
+        # Estimate normals with scale-adaptive radius
+        normal_radius = voxel_size * 2.5
+        pcd1_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
+        pcd2_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
         
-        # Run ICP
-        result = o3d.pipelines.registration.registration_icp(
+        threshold_coarse = max(config.icp_threshold * 4, extent * 0.08)
+        threshold_fine = max(config.icp_threshold, extent * 0.03)
+        
+        # Evaluate initial transform
+        init_eval = o3d.pipelines.registration.evaluate_registration(
+            pcd2_down, pcd1_down, threshold_coarse, initial_transform
+        )
+        init_fitness = init_eval.fitness
+        init_rmse = init_eval.inlier_rmse
+        logger.info(f"Initial alignment eval: fitness={init_fitness:.4f}, rmse={init_rmse:.4f}")
+        
+        # Stage 1: Coarse Point-to-Point ICP for robustness
+        res_coarse = o3d.pipelines.registration.registration_icp(
             pcd2_down, pcd1_down,
-            config.icp_threshold,
+            threshold_coarse,
             initial_transform,
-            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-            o3d.pipelines.registration.ICPConvergenceCriteria(
-                max_iteration=config.icp_iterations
-            ),
+            o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+            o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50),
         )
         
-        logger.info(f"ICP: fitness={result.fitness:.4f}, rmse={result.inlier_rmse:.6f}")
-        return result.transformation, result.fitness, result.inlier_rmse
+        # Stage 2: Fine Point-to-Plane ICP
+        current_trans = res_coarse.transformation if res_coarse.fitness >= init_fitness else initial_transform
+        res_fine = o3d.pipelines.registration.registration_icp(
+            pcd2_down, pcd1_down,
+            threshold_fine,
+            current_trans,
+            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+            o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=config.icp_iterations),
+        )
+        
+        best_trans = initial_transform
+        best_fitness = init_fitness
+        best_rmse = init_rmse
+        
+        if res_fine.fitness >= best_fitness:
+            best_trans = res_fine.transformation
+            best_fitness = res_fine.fitness
+            best_rmse = res_fine.inlier_rmse
+        elif res_coarse.fitness >= best_fitness:
+            best_trans = res_coarse.transformation
+            best_fitness = res_coarse.fitness
+            best_rmse = res_coarse.inlier_rmse
+            
+        logger.info(f"ICP: fitness={best_fitness:.4f}, rmse={best_rmse:.6f}")
+        return best_trans, best_fitness, best_rmse
         
     except Exception as e:
         logger.warning(f"ICP refinement failed: {e}")
@@ -426,20 +526,24 @@ def _direct_icp(
         center2 = pcd2.get_center()
         pcd2.translate(center1 - center2)
         
-        # Initial transform accounts for centering
         init = np.eye(4)
         init[:3, 3] = center1 - center2
         
-        voxel_size = 0.05
+        extent1 = float(np.linalg.norm(np.ptp(cloud1.points, axis=0)))
+        extent2 = float(np.linalg.norm(np.ptp(cloud2.points, axis=0)))
+        extent = max(extent1, extent2, 1.0)
+        voxel_size = max(0.05, extent * 0.02)
+        threshold = max(config.icp_threshold * 3, extent * 0.08)
+        
         pcd1_down = pcd1.voxel_down_sample(voxel_size)
         pcd2_down = pcd2.voxel_down_sample(voxel_size)
         
-        pcd1_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2, max_nn=30))
-        pcd2_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2, max_nn=30))
+        pcd1_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.5, max_nn=30))
+        pcd2_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.5, max_nn=30))
         
         result = o3d.pipelines.registration.registration_icp(
             pcd2_down, pcd1_down,
-            config.icp_threshold * 3,
+            threshold,
             init,
             o3d.pipelines.registration.TransformationEstimationPointToPoint(),
             o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=100),
@@ -453,3 +557,4 @@ def _direct_icp(
     except Exception as e:
         logger.warning(f"Direct ICP failed: {e}")
         return None, 0.0, float('inf')
+

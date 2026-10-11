@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
 
 # Virtual environments
 venv/
@@ -23,6 +24,11 @@ Thumbs.db
 outputs/
 *.ply
 *.pcd
+*.pkl
+
+# Local test videos (personal phone recordings)
+/before.mp4
+/after.mp4
 
 # Model weights (downloaded on demand)
 models/weights/

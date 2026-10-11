@@ -724,6 +724,66 @@ class TestRegressions:
         assert len(moved) == 1
         assert moved[0].displacement > 1.5
 
+    def test_unmatched_same_label_reconciled_to_moved(self):
+        """Regression: unmatched objects sharing labels within plausible room distance
+        must be reconciled as MOVED rather than false REMOVED + false ADDED."""
+        recon1 = SceneReconstruction(
+            "a.mp4", PointCloud(np.random.randn(100, 3) * 0.2),
+            [], CameraIntrinsics(500, 500, 320, 240, 640, 480), [],
+        )
+        # Position in recon2 has cloud points around it
+        cloud2 = np.vstack([np.random.randn(50, 3) * 0.2, np.random.randn(50, 3) * 0.2 + np.array([1.5, 0, 0])])
+        recon2 = SceneReconstruction(
+            "b.mp4", PointCloud(cloud2),
+            [], CameraIntrinsics(500, 500, 320, 240, 640, 480), [],
+        )
+
+        obj_before = TrackedObject("b1", "chair", [], mean_position_3d=np.array([0.0, 0.0, 0.0]))
+        obj_after = TrackedObject("a1", "chair", [], mean_position_3d=np.array([1.5, 0.0, 0.0]))
+
+        alignment = SceneAlignment(transform=np.eye(4), confidence=0.85)
+        # No initial tracker matches: cross-recording tracker failed to link them
+        matches = []
+
+        from roomshift.config import ChangeDetectionConfig
+        config = ChangeDetectionConfig(position_threshold=0.25, geometric_comparison=False)
+
+        changes = detect_changes(recon1, recon2, [obj_before], [obj_after], matches, alignment, config)
+        moved = [c for c in changes if c.change_type == ChangeType.MOVED]
+        removed = [c for c in changes if c.change_type == ChangeType.REMOVED]
+        added = [c for c in changes if c.change_type == ChangeType.ADDED]
+
+        assert len(moved) == 1, "Expected 1 reconciled MOVED change"
+        assert len(removed) == 0, "Should not emit false REMOVED when candidate exists"
+        assert len(added) == 0, "Should not emit false ADDED when candidate exists"
+        assert abs(moved[0].displacement - 1.5) < 0.1
+
+    def test_partial_visibility_yields_uncertain_not_removed(self):
+        """Regression: sparse/distant observations (dist between 0.5m and 1.2m)
+        must yield UNCERTAIN rather than false REMOVED."""
+        # Cloud 2 has points ~0.8m away from the object's original location
+        cloud2 = np.array([[0.8, 0.0, 0.0], [0.85, 0.0, 0.0]])
+        recon1 = SceneReconstruction(
+            "a.mp4", PointCloud(np.array([[0.0, 0.0, 0.0]])),
+            [], CameraIntrinsics(500, 500, 320, 240, 640, 480), [],
+        )
+        recon2 = SceneReconstruction(
+            "b.mp4", PointCloud(cloud2),
+            [], CameraIntrinsics(500, 500, 320, 240, 640, 480), [],
+        )
+
+        obj_before = TrackedObject("b1", "table", [], mean_position_3d=np.array([0.0, 0.0, 0.0]))
+        alignment = SceneAlignment(transform=np.eye(4), confidence=0.85)
+
+        from roomshift.config import ChangeDetectionConfig
+        config = ChangeDetectionConfig(geometric_comparison=False)
+
+        changes = detect_changes(recon1, recon2, [obj_before], [], [], alignment, config)
+        assert len(changes) == 1
+        assert changes[0].change_type == ChangeType.UNCERTAIN
+        assert changes[0].visibility_status in ("partial", "unobserved")
+
+
 
 # ─── Web Application Tests ──────────────────────────────────────────────────
 

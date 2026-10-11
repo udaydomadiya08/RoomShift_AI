@@ -39,6 +39,7 @@ def track_objects(
         by_frame[d.frame_index].append(d)
     
     sorted_frames = sorted(by_frame.keys())
+    frame_to_step = {f: idx for idx, f in enumerate(sorted_frames)}
     
     # Active tracks: track_id -> (last_frame, TrackedObject)
     active_tracks: Dict[str, tuple] = {}
@@ -46,6 +47,7 @@ def track_objects(
     
     for frame_idx in sorted_frames:
         frame_dets = by_frame[frame_idx]
+        current_step = frame_to_step[frame_idx]
         matched_tracks = set()
         matched_dets = set()
         
@@ -57,18 +59,25 @@ def track_objects(
             for track_id, (last_frame, track) in active_tracks.items():
                 if track_id in matched_tracks:
                     continue
-                if frame_idx - last_frame > max_frame_gap:
+                last_step = frame_to_step[last_frame]
+                if current_step - last_step > max_frame_gap:
                     continue
                 
-                # Score = label match + IoU with last detection
                 last_det = track.detections[-1]
+                if det.label != last_det.label:
+                    continue
                 
-                label_match = 1.0 if det.label == last_det.label else 0.0
                 iou = _compute_iou(det.bbox, last_det.bbox)
                 
-                score = 0.5 * label_match + 0.5 * iou
+                # Check 3D proximity if positions are available
+                spatial_score = 0.0
+                if det.position_3d is not None and last_det.position_3d is not None:
+                    d3 = float(np.linalg.norm(det.position_3d - last_det.position_3d))
+                    spatial_score = max(0.0, 1.0 - d3 / 2.0)
                 
-                if score > best_score and score > iou_threshold * 0.5:
+                score = 0.5 * iou + 0.5 * spatial_score if (iou > 0 and spatial_score > 0) else max(iou, spatial_score * 0.7)
+                
+                if score > best_score and score > 0.15:
                     best_score = score
                     best_track_id = track_id
             
@@ -91,7 +100,8 @@ def track_objects(
         # Close tracks that haven't been updated
         to_close = []
         for track_id, (last_frame, track) in active_tracks.items():
-            if frame_idx - last_frame > max_frame_gap:
+            last_step = frame_to_step[last_frame]
+            if current_step - last_step > max_frame_gap:
                 to_close.append(track_id)
         
         for tid in to_close:
@@ -104,8 +114,55 @@ def track_objects(
         _finalize_track(track)
         finished_tracks.append(track)
     
-    logger.info(f"Tracked {len(finished_tracks)} objects from {len(detections)} detections")
-    return finished_tracks
+    # Merge spatially proximate tracks sharing semantic label within this recording
+    final_tracks = _merge_spatial_tracks(finished_tracks)
+    logger.info(f"Tracked {len(final_tracks)} distinct objects from {len(detections)} detections")
+    return final_tracks
+
+
+def _merge_spatial_tracks(
+    tracks: List[TrackedObject],
+) -> List[TrackedObject]:
+    """Merge tracks with the same label whose 3D centroids are proximate."""
+    if len(tracks) <= 1:
+        return tracks
+
+    merged: List[TrackedObject] = []
+    used = set()
+
+    for i, t1 in enumerate(tracks):
+        if i in used:
+            continue
+        group = [t1]
+        used.add(i)
+
+        for j, t2 in enumerate(tracks):
+            if j in used or t1.label != t2.label:
+                continue
+
+            if t1.mean_position_3d is not None and t2.mean_position_3d is not None:
+                dist = float(np.linalg.norm(t1.mean_position_3d - t2.mean_position_3d))
+                thresh = 1.8 if t1.label in ("bed", "couch", "dining table") else 0.8
+                if dist < thresh:
+                    group.append(t2)
+                    used.add(j)
+
+        if len(group) == 1:
+            merged.append(t1)
+        else:
+            all_dets = []
+            for g in group:
+                all_dets.extend(g.detections)
+            merged_track = TrackedObject(
+                track_id=t1.track_id,
+                label=t1.label,
+                detections=all_dets,
+            )
+            _finalize_track(merged_track)
+            merged.append(merged_track)
+
+    return merged
+
 
 
 def _finalize_track(track: TrackedObject):
@@ -185,17 +242,22 @@ def match_objects_across_recordings(
             if obj2.mean_position_3d is None:
                 continue
             
-            # Label similarity (must match identical class label)
-            if obj1.label != obj2.label:
+            # Label similarity (identical class or synonymous furniture like desk/dining table)
+            TABLE_ALIASES = {"dining table", "desk"}
+            labels_match = (obj1.label == obj2.label) or (obj1.label in TABLE_ALIASES and obj2.label in TABLE_ALIASES)
+            if not labels_match:
                 continue
-            label_score = 1.0
+            label_score = 1.0 if obj1.label == obj2.label else 0.85
 
             # Position proximity (after transform)
             pos2_transformed = R @ obj2.mean_position_3d + t
-            distance = np.linalg.norm(obj1.mean_position_3d - pos2_transformed)
-            if distance > position_threshold:
+            distance = float(np.linalg.norm(obj1.mean_position_3d - pos2_transformed))
+            is_large = obj1.label in ("bed", "couch", "dining table", "desk")
+            thresh = position_threshold * 4.0 if is_large else position_threshold
+            if distance > thresh:
                 continue
-            position_score = max(0.0, 1.0 - distance / position_threshold)
+            position_score = max(0.0, 1.0 - distance / thresh)
+
 
             # Combined score
             score = (1.0 - appearance_weight) * position_score + appearance_weight * label_score

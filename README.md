@@ -20,21 +20,23 @@ python -m roomshift.cli evaluate-3rscan --data-dir data/external/3rscan --max-sc
 # Launch web interface
 python app.py
 
-# Run all 58 automated tests
+# Run all 70 automated tests
 pytest -v
 ```
 
-## Real-World Dataset Integration (3RScan Benchmark)
+## Real-World Dataset Integration & Real Video Validation
 
-RoomShift AI integrates the official **3RScan** dataset (Wald et al., ICCV 2019 / TUM CAMPAR), featuring 478 naturally changing indoor environments across 1,482 scans.
+RoomShift AI integrates the official **3RScan** dataset (Wald et al., ICCV 2019 / TUM CAMPAR) and includes end-to-end validation on real uncalibrated smartphone videos (`before.mp4` and `after.mp4`).
 
 - See [docs/DATASET_ANALYSIS.md](docs/DATASET_ANALYSIS.md) for licensing, data format specifications, and coordinate frames.
 - See [docs/EVALUATION.md](docs/EVALUATION.md) for empirical benchmark results on the 3RScan validation split.
+- See [docs/RECORDING_PROTOCOL.md](docs/RECORDING_PROTOCOL.md) for the smartphone video capture protocol.
+- See [outputs/real_room_test_v3/REAL_VIDEO_VALIDATION_REPORT_V3.md](outputs/real_room_test_v3/REAL_VIDEO_VALIDATION_REPORT_V3.md) for the real-video validation findings.
 
 ### Evaluation Separation Taxonomy
-- **Tier A (Synthetic Tests)**: 50 unit and regression tests verifying mathematical transforms, coordinate frame conversions, and pipeline components.
-- **Tier B (Real 3D Dataset Benchmark)**: 3RScan validation benchmark evaluating spatial change detection on real human room reconfigurations (F1: 0.318, Displacement MAE: 0.84 m across 25 scenes).
-- **Tier C (Casual Phone Video)**: End-to-end monocular video pipeline operational; full validation on casual uncalibrated consumer phone recordings remains pending authorized raw uncompressed video access.
+- **Tier A (Unit & Regression Tests)**: 70 automated unit and regression tests verifying mathematical transforms, coordinate frame conversions, scale-adaptive ICP, and object association logic.
+- **Tier B (Real 3D Dataset Benchmark)**: 3RScan validation benchmark evaluating spatial change detection on real human room reconfigurations (F1: **0.474**, Precision: **0.366**, Recall: **0.671**, MOVED F1: **0.701** across 25 validation scenes).
+- **Tier C (Real Smartphone Videos)**: End-to-end evaluation on real handheld phone videos (`before.mp4` / `after.mp4`) validating 3D scene registration, moved chair localization, and uncertainty preservation without metric distortion.
 
 
 ## Architecture

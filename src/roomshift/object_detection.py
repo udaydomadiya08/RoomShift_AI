@@ -187,16 +187,27 @@ def _estimate_3d_position(
         return None
     
     z = np.median(valid)
-    z = 1.0 / (z + 1e-6) * 2.0  # invert MiDaS and normalize
+    is_metric = getattr(depth_map, 'is_metric', False)
+    if is_metric:
+        z_norm = z
+    else:
+        # Invert MiDaS and normalize median depth to 2.0 units, exactly matching reconstruction.backproject_depth
+        valid_depth = depth[(depth > 0) & np.isfinite(depth)]
+        inv_all = 1.0 / (valid_depth + 1e-6)
+        median_inv = np.median(inv_all) if len(inv_all) > 0 else 1.0
+        if median_inv <= 0:
+            median_inv = 1.0
+        z_norm = (1.0 / (z + 1e-6)) / median_inv * 2.0
     
     K = reconstruction.intrinsics
-    x3d = (cx - K.cx) * z / K.fx
-    y3d = (cy - K.cy) * z / K.fy
+    x3d = (cx - K.cx) * z_norm / K.fx
+    y3d = (cy - K.cy) * z_norm / K.fy
     
     # Transform to world coordinates
-    pt_cam = np.array([x3d, y3d, z])
+    pt_cam = np.array([x3d, y3d, z_norm], dtype=np.float64).reshape(3, 1)
     R_inv = pose.rotation.T
-    t_inv = -R_inv @ pose.translation
-    pt_world = R_inv @ pt_cam + t_inv
+    t_inv = -R_inv @ pose.translation.reshape(3, 1)
+    pt_world = (R_inv @ pt_cam + t_inv).ravel()
     
     return pt_world
+
